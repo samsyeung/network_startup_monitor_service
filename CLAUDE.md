@@ -48,6 +48,7 @@ All timeouts and behavior can be customized via environment variables:
 - `RUN_AFTER_SUCCESS`: Time to run after network complete (default: 60s) 
 - `SLEEP_INTERVAL`: Check frequency (default: 5s)
 - `PING_TIMEOUT`: Gateway ping timeout (default: 1s)
+- `INTERFACE_TYPES`: Interface types to monitor (default: "ethernet bond")
 - `NETWORK_SERVICES`: Space-separated list of services to monitor
 
 ### Service Files

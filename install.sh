@@ -14,8 +14,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "Creating log file and setting permissions..."
-touch /var/log/network_monitor.log
-chmod 644 /var/log/network_monitor.log
+touch /var/log/network_startup_monitor.log
+chmod 644 /var/log/network_startup_monitor.log
 
 echo "Copying script to /usr/local/bin..."
 cp "$SCRIPT_DIR/${SCRIPT_NAME}" "/usr/local/bin/"
@@ -41,7 +41,7 @@ echo "  sudo systemctl status ${SERVICE_NAME}"
 echo ""
 echo "To view logs:"
 echo "  sudo journalctl -u ${SERVICE_NAME} -f"
-echo "  sudo tail -f /var/log/network_monitor.log"
+echo "  sudo tail -f /var/log/network_startup_monitor.log"
 echo ""
 echo "To stop the service:"
 echo "  sudo systemctl stop ${SERVICE_NAME}"

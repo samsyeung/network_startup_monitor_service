@@ -67,7 +67,7 @@ View logs:
 sudo journalctl -u network-monitor -f
 
 # Log file
-sudo tail -f /var/log/network_monitor.log
+sudo tail -f /var/log/network_startup_monitor.log
 ```
 
 #### Blocking Service (network-wait)
@@ -84,7 +84,7 @@ View logs:
 sudo journalctl -u network-wait -f
 
 # Log file  
-sudo tail -f /var/log/network_monitor.log
+sudo tail -f /var/log/network_startup_monitor.log
 ```
 
 Test manually:
@@ -114,11 +114,24 @@ Environment variables can customize behavior:
 - `RUN_AFTER_SUCCESS` - Time to run after network complete (default: 60 = 1 minute)
 - `SLEEP_INTERVAL` - Check interval in seconds (default: 5)
 - `PING_TIMEOUT` - Gateway ping timeout in seconds (default: 1)
+- `INTERFACE_TYPES` - Space-separated interface types to monitor (default: "ethernet bond")
 - `NETWORK_SERVICES` - Space-separated list of services to monitor
+
+**Interface Types:**
+- `ethernet` - Ethernet interfaces (default)
+- `wireless` - Wireless/WiFi interfaces
+- `bond` - Bond interfaces (default)
+- `tunnel` - Tunnel interfaces (VPN, etc.)
+- `all` - Monitor all interface types
+- `other` - Other/unknown interface types
 
 Example:
 ```bash
-sudo TOTAL_TIMEOUT=1800 RUN_AFTER_SUCCESS=120 PING_TIMEOUT=3 ./network_monitor.sh
+# Monitor ethernet and wireless interfaces
+sudo INTERFACE_TYPES="ethernet wireless" ./network_monitor.sh
+
+# Monitor all interfaces with custom timeouts
+sudo INTERFACE_TYPES="all" TOTAL_TIMEOUT=1800 PING_TIMEOUT=3 ./network_monitor.sh
 ```
 
 ## Exit Conditions
@@ -146,7 +159,9 @@ Network is considered "fully operational" when ALL of these are true:
 ### Network Services
 Monitors these systemd services (if present):
 - `systemd-networkd.service`
+- `systemd-networkd-wait-online.service`
 - `NetworkManager.service`
+- `NetworkManager-wait-online.service`
 - `systemd-resolved.service`
 - `networking.service`
 - `dhcpcd.service`
@@ -227,7 +242,7 @@ Ensure the script runs as root - it needs access to:
 - Network commands (`ip`, `ping`)
 
 ### Log File Access
-Log file location: `/var/log/network_monitor.log`
+Log file location: `/var/log/network_startup_monitor.log`
 Ensure proper permissions are set during installation.
 
 ## Use Cases

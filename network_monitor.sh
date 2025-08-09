@@ -1,13 +1,14 @@
 #!/bin/bash
 
-LOGFILE="/var/log/network_monitor.log"
+LOGFILE="/var/log/network_startup_monitor.log"
 LOCKFILE="/var/run/network_monitor.lock"
-SLEEP_INTERVAL=5
+SLEEP_INTERVAL=1
 TOTAL_TIMEOUT=900
 RUN_AFTER_SUCCESS=60
 PING_TIMEOUT=1
 BLOCKING_MODE=false
-NETWORK_SERVICES="systemd-networkd.service NetworkManager.service systemd-resolved.service networking.service dhcpcd.service wpa_supplicant.service"
+INTERFACE_TYPES="ethernet bond"
+NETWORK_SERVICES="systemd-networkd.service systemd-networkd-wait-online.service NetworkManager.service NetworkManager-wait-online.service systemd-resolved.service networking.service dhcpcd.service wpa_supplicant.service"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -24,7 +25,53 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+rotate_log_file() {
+    local max_size_mb=10
+    local max_archives=5
+    
+    # Check if log file exists and get size
+    if [ ! -f "$LOGFILE" ]; then
+        return 0
+    fi
+    
+    # Get file size in MB
+    local file_size_mb=$(du -m "$LOGFILE" 2>/dev/null | cut -f1)
+    if [ -z "$file_size_mb" ] || [ "$file_size_mb" -lt "$max_size_mb" ]; then
+        return 0
+    fi
+    
+    # Rotate logs
+    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local archived_log="${LOGFILE}.${timestamp}"
+    
+    # Move current log to archive
+    mv "$LOGFILE" "$archived_log"
+    
+    # Create new empty log file
+    touch "$LOGFILE"
+    chmod 644 "$LOGFILE"
+    
+    # Log rotation message to new file
+    echo "$(date '+%Y-%m-%d %H:%M:%S.%3N') - Log rotated: $archived_log (${file_size_mb}MB)" >> "$LOGFILE"
+    
+    # Clean up old archives - keep only the last N files
+    local log_dir=$(dirname "$LOGFILE")
+    local log_basename=$(basename "$LOGFILE")
+    
+    # Find archived logs and remove old ones
+    find "$log_dir" -name "${log_basename}.*" -type f -printf '%T@ %p\n' 2>/dev/null | \
+        sort -rn | \
+        tail -n +$((max_archives + 1)) | \
+        cut -d' ' -f2- | \
+        while read -r old_archive; do
+            rm -f "$old_archive"
+            echo "$(date '+%Y-%m-%d %H:%M:%S.%3N') - Removed old archive: $old_archive" >> "$LOGFILE"
+        done
+}
+
 log_message() {
+    # Check for log rotation before writing
+    rotate_log_file
     echo "$(date '+%Y-%m-%d %H:%M:%S.%3N') - $1" | tee -a "$LOGFILE"
 }
 
@@ -50,6 +97,31 @@ else
 fi
 
 START_TIME=$(date +%s)
+
+# Cache service information at startup to avoid repeated systemctl calls
+log_message "Caching network service information..."
+AVAILABLE_SERVICES=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1 ":" $2}')
+ENABLED_SERVICES=""
+for service in $NETWORK_SERVICES; do
+    service_info=$(echo "$AVAILABLE_SERVICES" | grep "^$service:")
+    if [ -n "$service_info" ]; then
+        service_state=$(echo "$service_info" | cut -d':' -f2)
+        case "$service_state" in
+            "enabled"|"enabled-runtime"|"static"|"generated"|"indirect")
+                ENABLED_SERVICES="$ENABLED_SERVICES $service"
+                log_message "Service $service: found and enabled/static - will monitor"
+                ;;
+            "disabled")
+                log_message "Service $service: found but disabled - skipping"
+                ;;
+            *)
+                log_message "Service $service: found with state '$service_state' - skipping"
+                ;;
+        esac
+    else
+        log_message "Service $service: not found - skipping"
+    fi
+done
 
 check_interface_status() {
     local interface="$1"
@@ -94,8 +166,81 @@ check_gateway_reachability() {
     fi
 }
 
+get_interface_type() {
+    local interface="$1"
+    local type_file="/sys/class/net/$interface/type"
+    
+    if [ -f "$type_file" ]; then
+        local arphrd_type=$(cat "$type_file" 2>/dev/null || echo "0")
+        
+        # Special handling for ARPHRD_ETHER (type 1) - could be ethernet, bridge, bond, etc.
+        if [ "$arphrd_type" = "1" ]; then
+            # Check for bridge
+            if [ -d "/sys/class/net/$interface/bridge" ]; then
+                echo "bridge"
+                return
+            fi
+            # Check for bond (handled separately but for completeness)
+            if [ -d "/proc/net/bonding/$interface" ]; then
+                echo "bond"
+                return
+            fi
+            # Check for VLAN
+            if [ -f "/proc/net/vlan/$interface" ]; then
+                echo "vlan"
+                return
+            fi
+            # Default to ethernet for ARPHRD_ETHER
+            echo "ethernet"
+        else
+            case "$arphrd_type" in
+                "772")  echo "loopback" ;;
+                "776")  echo "tunnel" ;;
+                "778")  echo "gre" ;;
+                "783")  echo "irda" ;;
+                "801")  echo "wireless" ;;
+                *)      echo "other" ;;
+            esac
+        fi
+    else
+        echo "unknown"
+    fi
+}
+
+is_interface_type_monitored() {
+    local interface="$1"
+    local interface_type=$(get_interface_type "$interface")
+    
+    # Check if this interface type should be monitored
+    for monitored_type in $INTERFACE_TYPES; do
+        case "$monitored_type" in
+            "all")
+                return 0
+                ;;
+            "$interface_type")
+                return 0
+                ;;
+            "bond")
+                if is_bond_interface "$interface"; then
+                    return 0
+                fi
+                ;;
+        esac
+    done
+    return 1
+}
+
 get_active_interfaces() {
-    ip link show | grep -E '^[0-9]+:' | grep -v 'lo:' | awk -F': ' '{print $2}' | awk '{print $1}'
+    local all_interfaces=$(ip link show | grep -E '^[0-9]+:' | grep -v 'lo:' | awk -F': ' '{print $2}' | awk '{print $1}')
+    local filtered_interfaces=""
+    
+    for interface in $all_interfaces; do
+        if is_interface_type_monitored "$interface"; then
+            filtered_interfaces="$filtered_interfaces $interface"
+        fi
+    done
+    
+    echo "$filtered_interfaces" | xargs -n1 | sort -u | xargs
 }
 
 is_bond_interface() {
@@ -199,10 +344,6 @@ check_service_status() {
     local active_state
     local load_state
     
-    if ! systemctl list-unit-files | grep -q "^$service"; then
-        return 1
-    fi
-    
     status_output=$(systemctl show "$service" --property=ActiveState,LoadState,SubState 2>/dev/null)
     if [ $? -ne 0 ]; then
         log_message "Service $service: QUERY FAILED"
@@ -219,8 +360,8 @@ check_service_status() {
             return 0
             ;;
         "inactive")
-            log_message "Service $service: INACTIVE ($sub_state)"
-            return 1
+            log_message "Service $service: INACTIVE ($sub_state) - skipping"
+            return 2
             ;;
         "failed")
             log_message "Service $service: FAILED ($sub_state)"
@@ -244,14 +385,31 @@ check_service_status() {
 check_network_services() {
     local all_services_ready=true
     local any_service_found=false
+    local active_services_count=0
+    local failed_services_count=0
     
-    for service in $NETWORK_SERVICES; do
-        if systemctl list-unit-files | grep -q "^$service"; then
-            any_service_found=true
-            if ! check_service_status "$service"; then
+    if [ -z "$ENABLED_SERVICES" ]; then
+        log_message "Network services: NONE FOUND"
+        return 1
+    fi
+    
+    any_service_found=true
+    
+    # Check each enabled service individually to get detailed status
+    for service in $ENABLED_SERVICES; do
+        check_service_status "$service"
+        local status=$?
+        case $status in
+            0)  # Active - count as ready
+                ((active_services_count++))
+                ;;
+            1)  # Failed/Starting/Stopping - count as not ready
                 all_services_ready=false
-            fi
-        fi
+                ((failed_services_count++))
+                ;;
+            2)  # Inactive - skip, don't count against readiness
+                ;;
+        esac
     done
     
     if [ "$any_service_found" = false ]; then
@@ -260,10 +418,15 @@ check_network_services() {
     fi
     
     if [ "$all_services_ready" = true ]; then
-        log_message "Network services: ALL READY"
-        return 0
+        if [ $active_services_count -eq 0 ]; then
+            log_message "Network services: ALL INACTIVE - skipping service checks"
+            return 0
+        else
+            log_message "Network services: ALL READY ($active_services_count active)"
+            return 0
+        fi
     else
-        log_message "Network services: SOME NOT READY"
+        log_message "Network services: $failed_services_count NOT READY, $active_services_count ready"
         return 1
     fi
 }
