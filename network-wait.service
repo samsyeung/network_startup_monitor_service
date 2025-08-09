@@ -1,0 +1,20 @@
+[Unit]
+Description=Network Wait Service - Blocks until network is fully operational
+Documentation=Blocks network-online.target until network interfaces, services, and gateway are ready
+After=sysinit.target systemd-networkd.service NetworkManager.service systemd-resolved.service
+Before=network-online.target
+Wants=network-online.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/network_monitor.sh --blocking
+TimeoutStartSec=900
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=network-online.target

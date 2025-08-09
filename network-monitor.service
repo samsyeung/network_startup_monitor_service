@@ -1,0 +1,21 @@
+[Unit]
+Description=Network Setup Monitor
+Documentation=Network interface and gateway monitoring service
+Before=systemd-networkd.service NetworkManager.service systemd-resolved.service networking.service network-online.target
+After=sysinit.target
+DefaultDependencies=no
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/network_monitor.sh
+Restart=on-failure
+RestartSec=10
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
