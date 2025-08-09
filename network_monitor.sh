@@ -9,6 +9,8 @@ PING_TIMEOUT=1
 BLOCKING_MODE=false
 INTERFACE_TYPES="ethernet bond"
 NETWORK_SERVICES="systemd-networkd.service systemd-networkd-wait-online.service NetworkManager.service NetworkManager-wait-online.service systemd-resolved.service networking.service dhcpcd.service wpa_supplicant.service"
+RESOLVER_HOSTNAME="google.com"
+DNS_TIMEOUT=3
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -162,6 +164,28 @@ check_gateway_reachability() {
         fi
     else
         log_message "Gateway: NOT CONFIGURED"
+        return 1
+    fi
+}
+
+check_hostname_resolution() {
+    local hostname="$1"
+    if [ -z "$hostname" ]; then
+        log_message "DNS resolution: NO HOSTNAME CONFIGURED"
+        return 1
+    fi
+    
+    if nslookup "$hostname" >/dev/null 2>&1; then
+        log_message "DNS resolution for $hostname: SUCCESS"
+        return 0
+    elif host "$hostname" >/dev/null 2>&1; then
+        log_message "DNS resolution for $hostname: SUCCESS (via host)"
+        return 0
+    elif getent hosts "$hostname" >/dev/null 2>&1; then
+        log_message "DNS resolution for $hostname: SUCCESS (via getent)"
+        return 0
+    else
+        log_message "DNS resolution for $hostname: FAILED (${DNS_TIMEOUT}s timeout)"
         return 1
     fi
 }
@@ -435,6 +459,7 @@ main_loop() {
     local all_interfaces_up=false
     local gateway_reachable=false
     local services_ready=false
+    local dns_working=false
     local network_complete_time=0
     
     while true; do
@@ -448,6 +473,7 @@ main_loop() {
         current_all_up=true
         current_gateway_reachable=false
         current_services_ready=false
+        current_dns_working=false
         
         log_message "=== Network Status Check ==="
         
@@ -486,6 +512,10 @@ main_loop() {
             current_gateway_reachable=true
         fi
         
+        if check_hostname_resolution "$RESOLVER_HOSTNAME"; then
+            current_dns_working=true
+        fi
+        
         if [ "$current_all_up" = true ] && [ "$all_interfaces_up" = false ]; then
             log_message "*** ALL INTERFACES ARE NOW UP ***"
             all_interfaces_up=true
@@ -510,14 +540,22 @@ main_loop() {
             services_ready=false
         fi
         
-        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ]; then
+        if [ "$current_dns_working" = true ] && [ "$dns_working" = false ]; then
+            log_message "*** DNS RESOLUTION IS NOW WORKING ***"
+            dns_working=true
+        elif [ "$current_dns_working" = false ] && [ "$dns_working" = true ]; then
+            log_message "*** DNS RESOLUTION NO LONGER WORKING ***"
+            dns_working=false
+        fi
+        
+        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ]; then
             if [ $network_complete_time -eq 0 ]; then
                 network_complete_time=$current_time
                 if [ "$BLOCKING_MODE" = true ]; then
                     log_message "*** NETWORK IS READY - UNBLOCKING BOOT PROCESS ***"
                     cleanup
                 else
-                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
+                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
                 fi
             else
                 time_since_complete=$((current_time - network_complete_time))
