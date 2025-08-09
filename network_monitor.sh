@@ -92,6 +92,18 @@ fi
 
 echo $$ > "$LOCKFILE"
 
+# Startup banner
+log_message "============================================================="
+log_message "    NETWORK STARTUP MONITOR SERVICE - $(date)"
+log_message "============================================================="
+log_message "PID: $$"
+log_message "Mode: $([ "$BLOCKING_MODE" = true ] && echo "BLOCKING" || echo "MONITORING")"
+log_message "Timeouts: Total=${TOTAL_TIMEOUT}s, AfterSuccess=${RUN_AFTER_SUCCESS}s, Sleep=${SLEEP_INTERVAL}s"
+log_message "Interface Types: $INTERFACE_TYPES"
+log_message "DNS Resolver: $RESOLVER_HOSTNAME (timeout: ${DNS_TIMEOUT}s)"
+log_message "Ping Timeout: ${PING_TIMEOUT}s"
+log_message "============================================================="
+
 if [ "$BLOCKING_MODE" = true ]; then
     log_message "Network wait service starting (BLOCKING MODE - timeout: ${TOTAL_TIMEOUT}s)"
 else
@@ -187,6 +199,189 @@ check_hostname_resolution() {
     else
         log_message "DNS resolution for $hostname: FAILED (${DNS_TIMEOUT}s timeout)"
         return 1
+    fi
+}
+
+check_arp_table() {
+    log_message "--- ARP Table Status ---"
+    
+    # Get all active interfaces
+    local interfaces
+    interfaces=$(get_active_interfaces)
+    
+    if [ -z "$interfaces" ]; then
+        log_message "ARP table: No interfaces to check"
+        return 1
+    fi
+    
+    local total_arp_entries=0
+    local gateway_arp_found=false
+    local gateway_ip
+    gateway_ip=$(get_default_gateway)
+    
+    # Check ARP entries per interface
+    for interface in $interfaces; do
+        local arp_count=0
+        local interface_entries=""
+        
+        # Get ARP entries for this interface using ip neighbor
+        if command -v ip >/dev/null 2>&1; then
+            interface_entries=$(ip neighbor show dev "$interface" 2>/dev/null | grep -v "FAILED\|INCOMPLETE")
+            if [ -n "$interface_entries" ]; then
+                arp_count=$(echo "$interface_entries" | wc -l)
+                total_arp_entries=$((total_arp_entries + arp_count))
+                
+                # Check if gateway IP is in this interface's ARP table
+                if [ -n "$gateway_ip" ]; then
+                    if echo "$interface_entries" | grep -q "^$gateway_ip "; then
+                        gateway_arp_found=true
+                        local gateway_mac
+                        gateway_mac=$(echo "$interface_entries" | grep "^$gateway_ip " | awk '{print $3}')
+                        log_message "ARP table $interface: $arp_count entries (gateway $gateway_ip -> $gateway_mac)"
+                    else
+                        log_message "ARP table $interface: $arp_count entries (no gateway entry)"
+                    fi
+                else
+                    log_message "ARP table $interface: $arp_count entries"
+                fi
+            else
+                log_message "ARP table $interface: 0 entries"
+            fi
+        else
+            log_message "ARP table $interface: ip command not available"
+        fi
+    done
+    
+    log_message "ARP table total: $total_arp_entries entries"
+    
+    if [ -n "$gateway_ip" ]; then
+        if [ "$gateway_arp_found" = true ]; then
+            log_message "ARP table gateway: $gateway_ip RESOLVED"
+            return 0
+        else
+            log_message "ARP table gateway: $gateway_ip NOT RESOLVED"
+            return 1
+        fi
+    else
+        # If no gateway, consider ARP table valid if we have any entries
+        if [ $total_arp_entries -gt 0 ]; then
+            log_message "ARP table: POPULATED (no gateway to check)"
+            return 0
+        else
+            log_message "ARP table: EMPTY"
+            return 1
+        fi
+    fi
+}
+
+check_routing_table() {
+    log_message "--- Routing Table Status ---"
+    
+    local total_routes=0
+    local default_routes=0
+    local interface_routes=0
+    local host_routes=0
+    local network_routes=0
+    
+    if command -v ip >/dev/null 2>&1; then
+        # Get routing table information
+        local route_output
+        route_output=$(ip route show 2>/dev/null)
+        
+        if [ -n "$route_output" ]; then
+            total_routes=$(echo "$route_output" | wc -l)
+            
+            # Count different types of routes
+            default_routes=$(echo "$route_output" | grep -c "^default " 2>/dev/null)
+            if [ -z "$default_routes" ] || [ "$default_routes" = "" ]; then default_routes=0; fi
+            
+            interface_routes=$(echo "$route_output" | grep -c " dev " 2>/dev/null)
+            if [ -z "$interface_routes" ] || [ "$interface_routes" = "" ]; then interface_routes=0; fi
+            
+            host_routes=$(echo "$route_output" | grep -c "/32 " 2>/dev/null)
+            if [ -z "$host_routes" ] || [ "$host_routes" = "" ]; then host_routes=0; fi
+            
+            network_routes=$(echo "$route_output" | grep -E "/[0-9]+ " 2>/dev/null | grep -v "/32 " 2>/dev/null | wc -l 2>/dev/null)
+            if [ -z "$network_routes" ] || [ "$network_routes" = "" ]; then network_routes=0; fi
+            
+            log_message "Routing table: $total_routes total routes"
+            log_message "Routing table: $default_routes default routes"
+            log_message "Routing table: $network_routes network routes"
+            log_message "Routing table: $host_routes host routes"
+            
+            # Check for default route details
+            if [ $default_routes -gt 0 ]; then
+                local default_route_info
+                default_route_info=$(echo "$route_output" | grep "^default ")
+                while IFS= read -r route_line; do
+                    if [ -n "$route_line" ]; then
+                        local gateway_ip=""
+                        local interface=""
+                        local metric=""
+                        
+                        # Parse route line for gateway, interface, and metric
+                        gateway_ip=$(echo "$route_line" | grep -o 'via [0-9.]*' | cut -d' ' -f2)
+                        interface=$(echo "$route_line" | grep -o 'dev [a-zA-Z0-9]*' | cut -d' ' -f2)
+                        metric=$(echo "$route_line" | grep -o 'metric [0-9]*' | cut -d' ' -f2)
+                        
+                        if [ -n "$metric" ]; then
+                            log_message "Default route: $gateway_ip via $interface (metric $metric)"
+                        else
+                            log_message "Default route: $gateway_ip via $interface"
+                        fi
+                    fi
+                done <<< "$default_route_info"
+                
+                log_message "*** ROUTING TABLE HAS DEFAULT ROUTE ***"
+                return 0
+            else
+                log_message "Routing table: NO DEFAULT ROUTE"
+                return 1
+            fi
+        else
+            log_message "Routing table: NO ROUTES FOUND"
+            return 1
+        fi
+    else
+        # Fallback to route command if ip is not available
+        if command -v route >/dev/null 2>&1; then
+            local route_output
+            route_output=$(route -n 2>/dev/null | tail -n +3)  # Skip header lines
+            
+            if [ -n "$route_output" ]; then
+                total_routes=$(echo "$route_output" | wc -l)
+                default_routes=$(echo "$route_output" | grep -c "^0.0.0.0 " || echo "0")
+                
+                log_message "Routing table: $total_routes total routes (route command)"
+                log_message "Routing table: $default_routes default routes"
+                
+                if [ $default_routes -gt 0 ]; then
+                    local default_info
+                    default_info=$(echo "$route_output" | grep "^0.0.0.0 ")
+                    echo "$default_info" | while IFS= read -r route_line; do
+                        if [ -n "$route_line" ]; then
+                            local gateway_ip
+                            local interface
+                            gateway_ip=$(echo "$route_line" | awk '{print $2}')
+                            interface=$(echo "$route_line" | awk '{print $8}')
+                            log_message "Default route: $gateway_ip via $interface"
+                        fi
+                    done
+                    
+                    log_message "*** ROUTING TABLE HAS DEFAULT ROUTE ***"
+                    return 0
+                else
+                    log_message "Routing table: NO DEFAULT ROUTE"
+                    return 1
+                fi
+            else
+                log_message "Routing table: NO ROUTES FOUND"
+                return 1
+            fi
+        else
+            log_message "Routing table: Neither 'ip' nor 'route' command available"
+            return 1
+        fi
     fi
 }
 
@@ -511,6 +706,8 @@ main_loop() {
     local services_ready=false
     local dns_working=false
     local nm_connectivity_full=false
+    local arp_table_valid=false
+    local routing_table_valid=false
     local network_complete_time=0
     
     while true; do
@@ -526,6 +723,8 @@ main_loop() {
         current_services_ready=false
         current_dns_working=false
         current_nm_connectivity_full=false
+        current_arp_table_valid=false
+        current_routing_table_valid=false
         
         log_message "=== Network Status Check ==="
         
@@ -577,6 +776,14 @@ main_loop() {
             current_nm_connectivity_full=true
         fi
         
+        if check_arp_table; then
+            current_arp_table_valid=true
+        fi
+        
+        if check_routing_table; then
+            current_routing_table_valid=true
+        fi
+        
         if [ "$current_all_up" = true ] && [ "$all_interfaces_up" = false ]; then
             log_message "*** ALL INTERFACES ARE NOW UP ***"
             all_interfaces_up=true
@@ -617,14 +824,30 @@ main_loop() {
             nm_connectivity_full=false
         fi
         
-        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ]; then
+        if [ "$current_arp_table_valid" = true ] && [ "$arp_table_valid" = false ]; then
+            log_message "*** ARP TABLE IS NOW VALID ***"
+            arp_table_valid=true
+        elif [ "$current_arp_table_valid" = false ] && [ "$arp_table_valid" = true ]; then
+            log_message "*** ARP TABLE NO LONGER VALID ***"
+            arp_table_valid=false
+        fi
+        
+        if [ "$current_routing_table_valid" = true ] && [ "$routing_table_valid" = false ]; then
+            log_message "*** ROUTING TABLE IS NOW VALID ***"
+            routing_table_valid=true
+        elif [ "$current_routing_table_valid" = false ] && [ "$routing_table_valid" = true ]; then
+            log_message "*** ROUTING TABLE NO LONGER VALID ***"
+            routing_table_valid=false
+        fi
+        
+        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ] && [ "$arp_table_valid" = true ] && [ "$routing_table_valid" = true ]; then
             if [ $network_complete_time -eq 0 ]; then
                 network_complete_time=$current_time
                 if [ "$BLOCKING_MODE" = true ]; then
                     log_message "*** NETWORK IS READY - UNBLOCKING BOOT PROCESS ***"
                     cleanup
                 else
-                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS + NetworkManager connectivity) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
+                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS + NetworkManager connectivity + ARP table + routing table) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
                 fi
             else
                 time_since_complete=$((current_time - network_complete_time))

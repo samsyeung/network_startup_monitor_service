@@ -8,6 +8,10 @@ A comprehensive network monitoring service that tracks network interface status,
 - **Bond/LACP Support**: Full bond interface monitoring including LACP negotiation state verification
 - **Service Monitoring**: Tracks network-related systemd services (NetworkManager, systemd-networkd, etc.)
 - **Gateway Testing**: Checks default gateway reachability via ping
+- **DNS Resolution**: Verifies hostname resolution capability
+- **NetworkManager Connectivity**: Checks NetworkManager connectivity state when available
+- **ARP Table Validation**: Monitors ARP entries per interface and gateway MAC resolution
+- **Routing Table Convergence**: Validates routing table population and default route presence
 - **Smart Exit Conditions**: Exits after 15 minutes total OR 1 minute after network is fully operational
 - **Detailed Logging**: Millisecond timestamps and comprehensive status tracking
 - **Flexible Deployment**: Can run as systemd service or ad hoc
@@ -112,10 +116,12 @@ Environment variables can customize behavior:
 
 - `TOTAL_TIMEOUT` - Maximum runtime in seconds (default: 900 = 15 minutes)
 - `RUN_AFTER_SUCCESS` - Time to run after network complete (default: 60 = 1 minute)
-- `SLEEP_INTERVAL` - Check interval in seconds (default: 5)
+- `SLEEP_INTERVAL` - Check interval in seconds (default: 1)
 - `PING_TIMEOUT` - Gateway ping timeout in seconds (default: 1)
 - `INTERFACE_TYPES` - Space-separated interface types to monitor (default: "ethernet bond")
 - `NETWORK_SERVICES` - Space-separated list of services to monitor
+- `RESOLVER_HOSTNAME` - Hostname for DNS resolution testing (default: "google.com")
+- `DNS_TIMEOUT` - DNS resolution timeout in seconds (default: 3)
 
 **Interface Types:**
 - `ethernet` - Ethernet interfaces (default)
@@ -146,6 +152,10 @@ Network is considered "fully operational" when ALL of these are true:
 - All bond interfaces have completed LACP negotiation (if applicable)
 - All network services are active
 - Default gateway is reachable
+- DNS hostname resolution is working
+- NetworkManager connectivity check passes (when available)
+- ARP table contains gateway MAC address resolution
+- Routing table has valid default route configuration
 
 ## Monitoring Scope
 
@@ -171,9 +181,43 @@ Monitors these systemd services (if present):
 - Discovers default gateway via routing table
 - Tests reachability with single ping (configurable timeout, default 1 second)
 
+### DNS Resolution
+- Tests hostname resolution using configurable hostname (default: google.com)
+- Configurable timeout for DNS queries (default: 3 seconds)
+
+### NetworkManager Integration
+- Checks NetworkManager connectivity state when available
+- Provides additional verification beyond basic network tests
+
+### ARP Table Validation
+- Monitors ARP entries per active network interface
+- Validates gateway IP to MAC address resolution
+- Detects incomplete link-layer negotiation issues
+- Critical for troubleshooting bond interface startup delays
+
+### Routing Table Convergence
+- Reports total routes, default routes, network routes, and host routes
+- Validates presence and details of default route
+- Shows route metrics for debugging path selection
+- Ensures kernel routing table is fully populated
+
 ## Log Format
 
 All log entries include millisecond timestamps (`YYYY-MM-DD HH:MM:SS.mmm`):
+
+### Startup Banner
+```
+2025-01-15 10:30:10.123 - =============================================================
+2025-01-15 10:30:10.124 -     NETWORK STARTUP MONITOR SERVICE - Wed Jan 15 10:30:10 UTC 2025
+2025-01-15 10:30:10.125 - =============================================================
+2025-01-15 10:30:10.126 - PID: 1234
+2025-01-15 10:30:10.127 - Mode: MONITORING
+2025-01-15 10:30:10.128 - Timeouts: Total=900s, AfterSuccess=60s, Sleep=1s
+2025-01-15 10:30:10.129 - Interface Types: ethernet bond
+2025-01-15 10:30:10.130 - DNS Resolver: google.com (timeout: 3s)
+2025-01-15 10:30:10.131 - Ping Timeout: 1s
+2025-01-15 10:30:10.132 - =============================================================
+```
 
 ### Interface Status
 ```
@@ -202,9 +246,42 @@ All log entries include millisecond timestamps (`YYYY-MM-DD HH:MM:SS.mmm`):
 2025-01-15 10:30:18.456 - *** GATEWAY IS NOW REACHABLE ***
 ```
 
+### DNS Resolution Status
+```
+2025-01-15 10:30:19.123 - DNS resolution for google.com: SUCCESS (3s timeout)
+2025-01-15 10:30:19.456 - *** DNS RESOLUTION IS NOW WORKING ***
+```
+
+### NetworkManager Connectivity
+```
+2025-01-15 10:30:20.123 - NetworkManager connectivity: FULL
+```
+
+### ARP Table Status
+```
+2025-01-15 10:30:21.123 - --- ARP Table Status ---
+2025-01-15 10:30:21.234 - ARP table eth0: 0 entries
+2025-01-15 10:30:21.345 - ARP table bond0: 3 entries (gateway 192.168.1.1 -> aa:bb:cc:dd:ee:ff)
+2025-01-15 10:30:21.456 - ARP table total: 3 entries
+2025-01-15 10:30:21.567 - ARP table gateway: 192.168.1.1 RESOLVED
+2025-01-15 10:30:21.678 - *** ARP TABLE IS NOW VALID ***
+```
+
+### Routing Table Status
+```
+2025-01-15 10:30:22.123 - --- Routing Table Status ---
+2025-01-15 10:30:22.234 - Routing table: 8 total routes
+2025-01-15 10:30:22.345 - Routing table: 1 default routes
+2025-01-15 10:30:22.456 - Routing table: 3 network routes
+2025-01-15 10:30:22.567 - Routing table: 2 host routes
+2025-01-15 10:30:22.678 - Default route: 192.168.1.1 via bond0 (metric 100)
+2025-01-15 10:30:22.789 - *** ROUTING TABLE HAS DEFAULT ROUTE ***
+2025-01-15 10:30:22.890 - *** ROUTING TABLE IS NOW VALID ***
+```
+
 ### Completion Status
 ```
-2025-01-15 10:30:20.123 - *** NETWORK SETUP COMPLETE (services + interfaces + gateway) *** (will exit in 60s)
+2025-01-15 10:30:23.123 - *** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS + NetworkManager connectivity + ARP table + routing table) *** (will exit in 60s)
 2025-01-15 10:31:20.456 - *** RUN-AFTER-SUCCESS PERIOD COMPLETE (60s) - EXITING ***
 ```
 
