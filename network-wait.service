@@ -1,6 +1,6 @@
 [Unit]
 Description=Network Wait Service - Blocks until network is fully operational
-Documentation=Blocks network-online.target until network interfaces, services, and gateway are ready
+Documentation=man:systemd.service(5)
 After=sysinit.target systemd-networkd.service NetworkManager.service systemd-resolved.service
 Before=network-online.target
 Wants=network-online.target

@@ -1,8 +1,7 @@
 [Unit]
 Description=Network Setup Monitor
-Documentation=Network interface and gateway monitoring service
+Documentation=man:systemd.service(5)
 Before=systemd-networkd.service NetworkManager.service systemd-resolved.service networking.service network-online.target
-After=sysinit.target
 DefaultDependencies=no
 
 [Service]

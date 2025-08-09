@@ -190,6 +190,56 @@ check_hostname_resolution() {
     fi
 }
 
+check_networkmanager_connectivity() {
+    # Check if NetworkManager is running first
+    if ! systemctl is-active NetworkManager >/dev/null 2>&1; then
+        log_message "NetworkManager connectivity: SERVICE NOT RUNNING"
+        return 2  # Service not available, don't count as failure
+    fi
+    
+    # Check if nmcli is available
+    if ! command -v nmcli >/dev/null 2>&1; then
+        log_message "NetworkManager connectivity: NMCLI NOT AVAILABLE"
+        return 2  # Tool not available, don't count as failure
+    fi
+    
+    local connectivity_status
+    connectivity_status=$(nmcli networking connectivity 2>/dev/null)
+    local nmcli_exit_code=$?
+    
+    if [ $nmcli_exit_code -ne 0 ]; then
+        log_message "NetworkManager connectivity: QUERY FAILED"
+        return 2  # Query failed, don't count as failure
+    fi
+    
+    case "$connectivity_status" in
+        "full")
+            log_message "NetworkManager connectivity: FULL"
+            return 0
+            ;;
+        "limited")
+            log_message "NetworkManager connectivity: LIMITED"
+            return 1
+            ;;
+        "portal")
+            log_message "NetworkManager connectivity: PORTAL (captive portal detected)"
+            return 1
+            ;;
+        "none")
+            log_message "NetworkManager connectivity: NONE"
+            return 1
+            ;;
+        "unknown")
+            log_message "NetworkManager connectivity: UNKNOWN (check disabled or failed)"
+            return 2  # Don't count as failure
+            ;;
+        *)
+            log_message "NetworkManager connectivity: UNEXPECTED STATUS ($connectivity_status)"
+            return 2  # Don't count as failure
+            ;;
+    esac
+}
+
 get_interface_type() {
     local interface="$1"
     local type_file="/sys/class/net/$interface/type"
@@ -460,6 +510,7 @@ main_loop() {
     local gateway_reachable=false
     local services_ready=false
     local dns_working=false
+    local nm_connectivity_full=false
     local network_complete_time=0
     
     while true; do
@@ -474,6 +525,7 @@ main_loop() {
         current_gateway_reachable=false
         current_services_ready=false
         current_dns_working=false
+        current_nm_connectivity_full=false
         
         log_message "=== Network Status Check ==="
         
@@ -516,6 +568,15 @@ main_loop() {
             current_dns_working=true
         fi
         
+        check_networkmanager_connectivity
+        nm_status=$?
+        if [ $nm_status -eq 0 ]; then
+            current_nm_connectivity_full=true
+        elif [ $nm_status -eq 2 ]; then
+            # Service not available, consider it as "working" (don't block on it)
+            current_nm_connectivity_full=true
+        fi
+        
         if [ "$current_all_up" = true ] && [ "$all_interfaces_up" = false ]; then
             log_message "*** ALL INTERFACES ARE NOW UP ***"
             all_interfaces_up=true
@@ -548,14 +609,22 @@ main_loop() {
             dns_working=false
         fi
         
-        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ]; then
+        if [ "$current_nm_connectivity_full" = true ] && [ "$nm_connectivity_full" = false ]; then
+            log_message "*** NETWORKMANAGER CONNECTIVITY IS NOW FULL ***"
+            nm_connectivity_full=true
+        elif [ "$current_nm_connectivity_full" = false ] && [ "$nm_connectivity_full" = true ]; then
+            log_message "*** NETWORKMANAGER CONNECTIVITY NO LONGER FULL ***"
+            nm_connectivity_full=false
+        fi
+        
+        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ]; then
             if [ $network_complete_time -eq 0 ]; then
                 network_complete_time=$current_time
                 if [ "$BLOCKING_MODE" = true ]; then
                     log_message "*** NETWORK IS READY - UNBLOCKING BOOT PROCESS ***"
                     cleanup
                 else
-                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
+                    log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS + NetworkManager connectivity) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
                 fi
             else
                 time_since_complete=$((current_time - network_complete_time))
