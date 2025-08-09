@@ -71,9 +71,15 @@ rotate_log_file() {
         done
 }
 
+# Log rotation check counter - only check every N log messages
+LOG_MESSAGE_COUNT=0
+
 log_message() {
-    # Check for log rotation before writing
-    rotate_log_file
+    # Only check for log rotation every 10 messages to reduce overhead
+    LOG_MESSAGE_COUNT=$((LOG_MESSAGE_COUNT + 1))
+    if [ $((LOG_MESSAGE_COUNT % 10)) -eq 0 ]; then
+        rotate_log_file
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S.%3N') - $1" | tee -a "$LOGFILE"
 }
 
@@ -143,8 +149,11 @@ check_interface_status() {
     local operstate_file="/sys/class/net/$interface/operstate"
     
     if [ -f "$carrier_file" ]; then
-        carrier=$(cat "$carrier_file" 2>/dev/null || echo "unknown")
-        operstate=$(cat "$operstate_file" 2>/dev/null || echo "unknown")
+        # Optimized: combine both file reads with compound redirection
+        {
+            read -r carrier < "$carrier_file" 2>/dev/null || carrier="unknown"
+            read -r operstate < "$operstate_file" 2>/dev/null || operstate="unknown"
+        }
         
         case "$carrier" in
             "1") carrier_status="UP" ;;
@@ -153,7 +162,9 @@ check_interface_status() {
         esac
         
         log_message "Interface $interface: carrier=$carrier_status, operstate=$operstate"
-        return 0
+        
+        # Return carrier status for caller (1 if up, 0 if down/unknown)
+        [ "$carrier" = "1" ]
     else
         log_message "Interface $interface: not found or not accessible"
         return 1
@@ -224,23 +235,40 @@ check_arp_table() {
         local arp_count=0
         local interface_entries=""
         
-        # Get ARP entries for this interface using ip neighbor
+        # Optimized: Get ARP entries with single-pass processing
         if command -v ip >/dev/null 2>&1; then
-            interface_entries=$(ip neighbor show dev "$interface" 2>/dev/null | grep -v "FAILED\|INCOMPLETE")
+            local interface_entries gateway_mac=""
+            interface_entries=$(ip neighbor show dev "$interface" 2>/dev/null)
+            
             if [ -n "$interface_entries" ]; then
-                arp_count=$(echo "$interface_entries" | wc -l)
+                # Single-pass processing of ARP entries
+                {
+                    arp_count=0
+                    while IFS= read -r arp_line; do
+                        # Skip failed/incomplete entries
+                        case "$arp_line" in
+                            *"FAILED"*|*"INCOMPLETE"*) continue ;;
+                        esac
+                        
+                        if [ -n "$arp_line" ]; then
+                            ((arp_count++))
+                            
+                            # Check for gateway in same pass
+                            if [ -n "$gateway_ip" ] && [[ "$arp_line" =~ ^"$gateway_ip " ]]; then
+                                gateway_arp_found=true
+                                gateway_mac=$(echo "$arp_line" | awk '{print $3}')
+                            fi
+                        fi
+                    done
+                } <<< "$interface_entries"
+                
                 total_arp_entries=$((total_arp_entries + arp_count))
                 
-                # Check if gateway IP is in this interface's ARP table
-                if [ -n "$gateway_ip" ]; then
-                    if echo "$interface_entries" | grep -q "^$gateway_ip "; then
-                        gateway_arp_found=true
-                        local gateway_mac
-                        gateway_mac=$(echo "$interface_entries" | grep "^$gateway_ip " | awk '{print $3}')
-                        log_message "ARP table $interface: $arp_count entries (gateway $gateway_ip -> $gateway_mac)"
-                    else
-                        log_message "ARP table $interface: $arp_count entries (no gateway entry)"
-                    fi
+                # Log results
+                if [ -n "$gateway_ip" ] && [ "$gateway_arp_found" = true ] && [ -n "$gateway_mac" ]; then
+                    log_message "ARP table $interface: $arp_count entries (gateway $gateway_ip -> $gateway_mac)"
+                elif [ -n "$gateway_ip" ]; then
+                    log_message "ARP table $interface: $arp_count entries (no gateway entry)"
                 else
                     log_message "ARP table $interface: $arp_count entries"
                 fi
@@ -289,20 +317,37 @@ check_routing_table() {
         route_output=$(ip route show 2>/dev/null)
         
         if [ -n "$route_output" ]; then
-            total_routes=$(echo "$route_output" | wc -l)
-            
-            # Count different types of routes
-            default_routes=$(echo "$route_output" | grep -c "^default " 2>/dev/null)
-            if [ -z "$default_routes" ] || [ "$default_routes" = "" ]; then default_routes=0; fi
-            
-            interface_routes=$(echo "$route_output" | grep -c " dev " 2>/dev/null)
-            if [ -z "$interface_routes" ] || [ "$interface_routes" = "" ]; then interface_routes=0; fi
-            
-            host_routes=$(echo "$route_output" | grep -c "/32 " 2>/dev/null)
-            if [ -z "$host_routes" ] || [ "$host_routes" = "" ]; then host_routes=0; fi
-            
-            network_routes=$(echo "$route_output" | grep -E "/[0-9]+ " 2>/dev/null | grep -v "/32 " 2>/dev/null | wc -l 2>/dev/null)
-            if [ -z "$network_routes" ] || [ "$network_routes" = "" ]; then network_routes=0; fi
+            # Optimized: Single-pass processing instead of multiple grep operations
+            {
+                total_routes=0
+                default_routes=0
+                interface_routes=0
+                host_routes=0
+                network_routes=0
+                
+                while IFS= read -r route_line; do
+                    if [ -n "$route_line" ]; then
+                        ((total_routes++))
+                        
+                        # Check route type in single pass
+                        case "$route_line" in
+                            "default "*)
+                                ((default_routes++))
+                                ;;
+                        esac
+                        
+                        # Check for interface routes
+                        [[ "$route_line" =~ " dev " ]] && ((interface_routes++))
+                        
+                        # Check for host routes
+                        if [[ "$route_line" =~ "/32 " ]]; then
+                            ((host_routes++))
+                        elif [[ "$route_line" =~ /[0-9]+\  ]]; then
+                            ((network_routes++))
+                        fi
+                    fi
+                done
+            } <<< "$route_output"
             
             log_message "Routing table: $total_routes total routes"
             log_message "Routing table: $default_routes default routes"
@@ -500,6 +545,10 @@ is_interface_type_monitored() {
 }
 
 get_active_interfaces() {
+    # IMPORTANT: Never cache this function's result - interface discovery
+    # during boot is one of the key things we need to troubleshoot.
+    # Interfaces can be created/renamed/removed during system startup,
+    # especially with bond interfaces, network managers, and udev rules.
     local all_interfaces=$(ip link show | grep -E '^[0-9]+:' | grep -v 'lo:' | awk -F': ' '{print $2}' | awk '{print $1}')
     local filtered_interfaces=""
     
@@ -664,22 +713,69 @@ check_network_services() {
     
     any_service_found=true
     
-    # Check each enabled service individually to get detailed status
-    for service in $ENABLED_SERVICES; do
-        check_service_status "$service"
-        local status=$?
-        case $status in
-            0)  # Active - count as ready
-                ((active_services_count++))
-                ;;
-            1)  # Failed/Starting/Stopping - count as not ready
-                all_services_ready=false
-                ((failed_services_count++))
-                ;;
-            2)  # Inactive - skip, don't count against readiness
-                ;;
-        esac
-    done
+    # Optimized: Batch systemctl call for all services at once
+    local batch_output
+    batch_output=$(systemctl show $ENABLED_SERVICES --property=ActiveState,LoadState,SubState 2>/dev/null)
+    
+    if [ $? -ne 0 ]; then
+        log_message "Network services: BATCH QUERY FAILED - falling back to individual checks"
+        # Fallback to individual checks
+        for service in $ENABLED_SERVICES; do
+            check_service_status "$service"
+            local status=$?
+            case $status in
+                0) ((active_services_count++)) ;;
+                1) all_services_ready=false; ((failed_services_count++)) ;;
+            esac
+        done
+    else
+        # Process batched results
+        local current_service=""
+        local service_index=0
+        local services_array=($ENABLED_SERVICES)
+        
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^ActiveState= ]]; then
+                current_service="${services_array[$service_index]}"
+                local active_state="${line#ActiveState=}"
+                local load_state sub_state
+                
+                # Read next two lines for LoadState and SubState
+                read -r load_line
+                read -r sub_line
+                load_state="${load_line#LoadState=}"
+                sub_state="${sub_line#SubState=}"
+                
+                # Process service status
+                case "$active_state" in
+                    "active")
+                        log_message "Service $current_service: ACTIVE ($sub_state)"
+                        ((active_services_count++))
+                        ;;
+                    "inactive")
+                        log_message "Service $current_service: INACTIVE ($sub_state) - skipping"
+                        ;;
+                    "failed")
+                        log_message "Service $current_service: FAILED ($sub_state)"
+                        all_services_ready=false
+                        ((failed_services_count++))
+                        ;;
+                    "activating")
+                        log_message "Service $current_service: STARTING ($sub_state)"
+                        all_services_ready=false
+                        ((failed_services_count++))
+                        ;;
+                    *)
+                        log_message "Service $current_service: UNKNOWN STATE ($active_state/$sub_state)"
+                        all_services_ready=false
+                        ((failed_services_count++))
+                        ;;
+                esac
+                
+                ((service_index++))
+            fi
+        done <<< "$batch_output"
+    fi
     
     if [ "$any_service_found" = false ]; then
         log_message "Network services: NONE FOUND"
@@ -738,16 +834,9 @@ main_loop() {
             current_all_up=false
         else
             for interface in $interfaces; do
+                # check_interface_status now returns carrier status directly
                 if ! check_interface_status "$interface"; then
                     current_all_up=false
-                fi
-                
-                carrier_file="/sys/class/net/$interface/carrier"
-                if [ -f "$carrier_file" ]; then
-                    carrier=$(cat "$carrier_file" 2>/dev/null || echo "0")
-                    if [ "$carrier" != "1" ]; then
-                        current_all_up=false
-                    fi
                 fi
                 
                 if is_bond_interface "$interface"; then

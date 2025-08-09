@@ -322,6 +322,31 @@ Ensure the script runs as root - it needs access to:
 Log file location: `/var/log/network_startup_monitor.log`
 Ensure proper permissions are set during installation.
 
+## Performance Considerations
+
+**Interface Discovery**: The script intentionally does NOT cache network interface discovery results. This is critical for boot-time troubleshooting because:
+- Interfaces are frequently created/renamed/removed during system startup
+- Bond interfaces may not exist initially and get created during LACP negotiation
+- Network managers (NetworkManager, systemd-networkd) can rename interfaces
+- Udev rules may cause interface name changes
+- Hot-plugged network devices appear during boot
+
+Caching interface discovery would prevent detection of these dynamic changes, which are often the root cause of network startup delays.
+
+## Performance Optimizations
+
+The script includes several performance optimizations to minimize system overhead during boot:
+
+**Optimized Log Rotation**: Log file rotation is checked every 10 messages instead of every message, reducing file system overhead while maintaining log management.
+
+**Batched Service Checks**: Network services are queried using a single batched `systemctl show` command instead of individual calls, significantly reducing systemd interaction overhead. Falls back to individual checks if batch operation fails.
+
+**Single-Pass Processing**: Route table analysis and ARP table processing use single-pass algorithms instead of multiple grep/wc command pipelines, eliminating redundant data processing.
+
+**Combined File Operations**: Interface status checks combine carrier and operstate file reads using compound redirection, reducing file system I/O operations.
+
+These optimizations maintain full diagnostic accuracy while minimizing resource usage during the critical boot phase when system performance matters most.
+
 ## Use Cases
 
 ### Non-Blocking Mode
