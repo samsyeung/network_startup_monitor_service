@@ -1,0 +1,33 @@
+- The script to exist after RUN_AFTER_SUCCESS seconds, even when run from systemd.
+- On start up there are some errors logged about readonly filesystem
+```Aug 10 01:00:45 lab network_monitor.sh[1096]: tee: /var/log/network_startup_monitor.log: Read-only file system
+Aug 10 01:00:45 lab network_monitor.sh[1096]: 2025-08-10 01:00:45.168 - =============================================================
+Aug 10 01:00:45 lab network_monitor.sh[1100]: tee: /var/log/network_startup_monitor.log: Read-only file system
+Aug 10 01:00:45 lab network_monitor.sh[1100]: 2025-08-10 01:00:45.174 -     NETWORK STARTUP MONITOR SERVICE - Sun Aug 10 01:00:45 AM BST 2025
+``` 
+presumably because the service is running before the filesystem is mounted read-write, can we hide these warnings.
+- On start up, the script claims NetworkManager connectivity status is FULL . even though NetworkManager service is not yet running, do not consider NetworkManager connectivity full in that case.
+```Aug 10 01:00:46 lab network_monitor.sh[1257]: 2025-08-10 01:00:46.499 - === Network Status Check ===
+Aug 10 01:00:46 lab network_monitor.sh[1263]: 2025-08-10 01:00:46.527 - Service NetworkManager.service: INACTIVE () - skipping
+Aug 10 01:00:46 lab network_monitor.sh[1266]: 2025-08-10 01:00:46.531 - Service NetworkManager-wait-online.service: INACTIVE () - skipping
+Aug 10 01:00:46 lab network_monitor.sh[1270]: 2025-08-10 01:00:46.535 - Service systemd-resolved.service: INACTIVE () - skipping
+Aug 10 01:00:46 lab network_monitor.sh[1280]: 2025-08-10 01:00:46.539 - Service wpa_supplicant.service: INACTIVE () - skipping
+Aug 10 01:00:46 lab network_monitor.sh[1287]: 2025-08-10 01:00:46.544 - Network services: ALL INACTIVE - skipping service checks
+Aug 10 01:00:46 lab network_monitor.sh[1362]: 2025-08-10 01:00:46.578 - Interface eno1: carrier=UNKNOWN, operstate=down
+Aug 10 01:00:46 lab network_monitor.sh[1371]: 2025-08-10 01:00:46.582 - Interface eno2: carrier=UNKNOWN, operstate=down
+Aug 10 01:00:46 lab network_monitor.sh[1375]: 2025-08-10 01:00:46.585 - Interface enxdefa0a1b5099: carrier=UNKNOWN, operstate=down
+Aug 10 01:00:46 lab network_monitor.sh[1406]: 2025-08-10 01:00:46.595 - Gateway: NOT CONFIGURED
+Aug 10 01:00:46 lab network_monitor.sh[1504]: 2025-08-10 01:00:46.671 - DNS resolution for google.com: FAILED (3s timeout)
+Aug 10 01:00:46 lab network_monitor.sh[1585]: 2025-08-10 01:00:46.820 - NetworkManager connectivity: SERVICE NOT RUNNING
+Aug 10 01:00:46 lab network_monitor.sh[1593]: 2025-08-10 01:00:46.824 - --- ARP Table Status ---
+Aug 10 01:00:46 lab network_monitor.sh[1657]: 2025-08-10 01:00:46.856 - ARP table eno1: 0 entries
+Aug 10 01:00:46 lab network_monitor.sh[1662]: 2025-08-10 01:00:46.861 - ARP table eno2: 0 entries
+Aug 10 01:00:46 lab network_monitor.sh[1667]: 2025-08-10 01:00:46.866 - ARP table enxdefa0a1b5099: 0 entries
+Aug 10 01:00:46 lab network_monitor.sh[1671]: 2025-08-10 01:00:46.868 - ARP table total: 0 entries
+Aug 10 01:00:46 lab network_monitor.sh[1674]: 2025-08-10 01:00:46.871 - ARP table: EMPTY
+Aug 10 01:00:46 lab network_monitor.sh[1677]: 2025-08-10 01:00:46.873 - --- Routing Table Status ---
+Aug 10 01:00:46 lab network_monitor.sh[1685]: 2025-08-10 01:00:46.880 - Routing table: NO ROUTES FOUND
+Aug 10 01:00:46 lab network_monitor.sh[1688]: 2025-08-10 01:00:46.883 - *** NETWORK SERVICES ARE NOW READY ***
+Aug 10 01:00:46 lab network_monitor.sh[1692]: 2025-08-10 01:00:46.886 - *** NETWORKMANAGER CONNECTIVITY IS NOW FULL ***
+```
+Also the script report network services are not ready even though they are all still inactive, lets wait for them to be active

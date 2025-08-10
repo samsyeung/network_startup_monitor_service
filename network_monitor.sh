@@ -1,16 +1,29 @@
 #!/bin/bash
 
-LOGFILE="/var/log/network_startup_monitor.log"
-LOCKFILE="/var/run/network_monitor.lock"
+# Set log file location based on user privileges
+if [ "$(id -u)" -eq 0 ]; then
+    LOGFILE="/var/log/network_startup_monitor.log"
+    LOCKFILE="/var/run/network_monitor.lock"
+else
+    # Non-root user - use home directory or temp location
+    if [ -n "$HOME" ] && [ -w "$HOME" ]; then
+        LOGFILE="$HOME/network_startup_monitor.log"
+        LOCKFILE="$HOME/network_monitor.lock"
+    else
+        LOGFILE="/tmp/network_startup_monitor_$(id -u).log"
+        LOCKFILE="/tmp/network_monitor_$(id -u).lock"
+    fi
+fi
 SLEEP_INTERVAL=1
 TOTAL_TIMEOUT=900
-RUN_AFTER_SUCCESS=60
+RUN_AFTER_SUCCESS=5
 PING_TIMEOUT=1
 BLOCKING_MODE=false
 INTERFACE_TYPES="ethernet bond"
+REQUIRED_INTERFACES=""  # Space-separated list of specific interfaces that must be up (empty = any interface sufficient)
 NETWORK_SERVICES="systemd-networkd.service systemd-networkd-wait-online.service NetworkManager.service NetworkManager-wait-online.service systemd-resolved.service networking.service dhcpcd.service wpa_supplicant.service"
 RESOLVER_HOSTNAME="google.com"
-DNS_TIMEOUT=3
+DNS_TIMEOUT=1
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -20,8 +33,107 @@ while [[ $# -gt 0 ]]; do
             RUN_AFTER_SUCCESS=0
             shift
             ;;
+        --required-interfaces)
+            if [ -z "$2" ]; then
+                echo "Error: --required-interfaces requires a space-separated list of interface names"
+                exit 1
+            fi
+            REQUIRED_INTERFACES="$2"
+            shift 2
+            ;;
+        --total-timeout)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --total-timeout requires a positive integer (seconds)"
+                exit 1
+            fi
+            TOTAL_TIMEOUT="$2"
+            shift 2
+            ;;
+        --run-after-success)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --run-after-success requires a positive integer (seconds)"
+                exit 1
+            fi
+            RUN_AFTER_SUCCESS="$2"
+            shift 2
+            ;;
+        --sleep-interval)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --sleep-interval requires a positive integer (seconds)"
+                exit 1
+            fi
+            SLEEP_INTERVAL="$2"
+            shift 2
+            ;;
+        --ping-timeout)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --ping-timeout requires a positive integer (seconds)"
+                exit 1
+            fi
+            PING_TIMEOUT="$2"
+            shift 2
+            ;;
+        --dns-timeout)
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                echo "Error: --dns-timeout requires a positive integer (seconds)"
+                exit 1
+            fi
+            DNS_TIMEOUT="$2"
+            shift 2
+            ;;
+        --interface-types)
+            if [ -z "$2" ]; then
+                echo "Error: --interface-types requires a space-separated list of types"
+                exit 1
+            fi
+            INTERFACE_TYPES="$2"
+            shift 2
+            ;;
+        --network-services)
+            if [ -z "$2" ]; then
+                echo "Error: --network-services requires a space-separated list of service names"
+                exit 1
+            fi
+            NETWORK_SERVICES="$2"
+            shift 2
+            ;;
+        --resolver-hostname)
+            if [ -z "$2" ]; then
+                echo "Error: --resolver-hostname requires a hostname"
+                exit 1
+            fi
+            RESOLVER_HOSTNAME="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Network startup monitor service for Linux systems"
+            echo ""
+            echo "OPTIONS:"
+            echo "  --blocking                      Exit immediately when network is ready (default: continuous monitoring)"
+            echo "  --required-interfaces \"list\"    Space-separated interfaces that must be up (default: any interface sufficient)"
+            echo "  --total-timeout SECONDS        Maximum runtime in seconds (default: 900)"
+            echo "  --run-after-success SECONDS    Time to run after network ready in monitoring mode (default: 60)"
+            echo "  --sleep-interval SECONDS       Check frequency in seconds (default: 1)"
+            echo "  --ping-timeout SECONDS         Gateway ping timeout in seconds (default: 1)"
+            echo "  --dns-timeout SECONDS          DNS resolution timeout in seconds (default: 1)"
+            echo "  --interface-types \"list\"       Space-separated interface types to monitor (default: \"ethernet bond\")"
+            echo "  --network-services \"list\"      Space-separated network services to monitor"
+            echo "  --resolver-hostname HOSTNAME   Hostname for DNS resolution test (default: google.com)"
+            echo "  --help, -h                      Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0                                           # Monitor any interface, continuous mode"
+            echo "  $0 --blocking                                # Exit when network ready"
+            echo "  $0 --required-interfaces \"eth0 eth1\"        # Require specific interfaces"
+            echo "  $0 --total-timeout 300 --dns-timeout 2      # Custom timeouts"
+            echo "  $0 --interface-types \"ethernet bond vlan\"   # Monitor additional interface types"
+            exit 0
+            ;;
         *)
             echo "Unknown option: $1"
+            echo "Use --help for usage information"
             exit 1
             ;;
     esac
@@ -80,7 +192,15 @@ log_message() {
     if [ $((LOG_MESSAGE_COUNT % 10)) -eq 0 ]; then
         rotate_log_file
     fi
-    echo "$(date '+%Y-%m-%d %H:%M:%S.%3N') - $1" | tee -a "$LOGFILE"
+    
+    local timestamp="$(date '+%Y-%m-%d %H:%M:%S.%3N') - $1"
+    echo "$timestamp"
+    
+    # Try to append to logfile, but suppress read-only filesystem errors during boot
+    if ! echo "$timestamp" >> "$LOGFILE" 2>/dev/null; then
+        # Silently continue if we can't write to log file (e.g., during early boot)
+        true
+    fi
 }
 
 cleanup() {
@@ -106,6 +226,11 @@ log_message "PID: $$"
 log_message "Mode: $([ "$BLOCKING_MODE" = true ] && echo "BLOCKING" || echo "MONITORING")"
 log_message "Timeouts: Total=${TOTAL_TIMEOUT}s, AfterSuccess=${RUN_AFTER_SUCCESS}s, Sleep=${SLEEP_INTERVAL}s"
 log_message "Interface Types: $INTERFACE_TYPES"
+if [ -n "$REQUIRED_INTERFACES" ]; then
+    log_message "Required Interfaces: $REQUIRED_INTERFACES (all must be up)"
+else
+    log_message "Required Interfaces: Any interface sufficient"
+fi
 log_message "DNS Resolver: $RESOLVER_HOSTNAME (timeout: ${DNS_TIMEOUT}s)"
 log_message "Ping Timeout: ${PING_TIMEOUT}s"
 log_message "============================================================="
@@ -198,13 +323,16 @@ check_hostname_resolution() {
         return 1
     fi
     
-    if nslookup "$hostname" >/dev/null 2>&1; then
+    # Try nslookup with timeout
+    if timeout "${DNS_TIMEOUT}s" nslookup "$hostname" >/dev/null 2>&1; then
         log_message "DNS resolution for $hostname: SUCCESS"
         return 0
-    elif host "$hostname" >/dev/null 2>&1; then
+    # Try host command with timeout
+    elif timeout "${DNS_TIMEOUT}s" host "$hostname" >/dev/null 2>&1; then
         log_message "DNS resolution for $hostname: SUCCESS (via host)"
         return 0
-    elif getent hosts "$hostname" >/dev/null 2>&1; then
+    # Try getent with timeout (getent doesn't have built-in timeout)
+    elif timeout "${DNS_TIMEOUT}s" getent hosts "$hostname" >/dev/null 2>&1; then
         log_message "DNS resolution for $hostname: SUCCESS (via getent)"
         return 0
     else
@@ -377,7 +505,6 @@ check_routing_table() {
                     fi
                 done <<< "$default_route_info"
                 
-                log_message "*** ROUTING TABLE HAS DEFAULT ROUTE ***"
                 return 0
             else
                 log_message "Routing table: NO DEFAULT ROUTE"
@@ -413,7 +540,6 @@ check_routing_table() {
                         fi
                     done
                     
-                    log_message "*** ROUTING TABLE HAS DEFAULT ROUTE ***"
                     return 0
                 else
                     log_message "Routing table: NO DEFAULT ROUTE"
@@ -656,6 +782,79 @@ check_lacp_status() {
     fi
 }
 
+check_interfaces_ready() {
+    local interfaces=$(get_active_interfaces)
+    local interfaces_up=0
+    local interfaces_down=0
+    local required_interfaces_up=0
+    local required_interfaces_down=0
+    
+    if [ -z "$interfaces" ]; then
+        log_message "No network interfaces found"
+        return 1
+    fi
+    
+    # Check all monitored interfaces
+    for interface in $interfaces; do
+        local interface_up=false
+        
+        # Check interface status
+        if check_interface_status "$interface"; then
+            interface_up=true
+            ((interfaces_up++))
+        else
+            ((interfaces_down++))
+        fi
+        
+        # Check bond status if applicable
+        if is_bond_interface "$interface"; then
+            if ! check_bond_status "$interface"; then
+                if [ "$interface_up" = true ]; then
+                    ((interfaces_up--))
+                    ((interfaces_down++))
+                fi
+                interface_up=false
+            fi
+        fi
+        
+        # Check if this is a required interface
+        if [ -n "$REQUIRED_INTERFACES" ]; then
+            for required_interface in $REQUIRED_INTERFACES; do
+                if [ "$interface" = "$required_interface" ]; then
+                    if [ "$interface_up" = true ]; then
+                        ((required_interfaces_up++))
+                    else
+                        ((required_interfaces_down++))
+                    fi
+                    break
+                fi
+            done
+        fi
+    done
+    
+    # Determine if interfaces are ready
+    if [ -n "$REQUIRED_INTERFACES" ]; then
+        # Specific interfaces required - all must be up
+        local total_required_interfaces=$(echo "$REQUIRED_INTERFACES" | wc -w)
+        if [ $required_interfaces_up -eq $total_required_interfaces ] && [ $required_interfaces_down -eq 0 ]; then
+            log_message "Required interfaces: ALL UP ($required_interfaces_up/$total_required_interfaces)"
+            return 0
+        else
+            log_message "Required interfaces: $required_interfaces_down DOWN, $required_interfaces_up UP (need all $total_required_interfaces)"
+            return 1
+        fi
+    else
+        # Any interface sufficient - at least one must be up
+        if [ $interfaces_up -gt 0 ]; then
+            log_message "Interfaces: $interfaces_up UP, $interfaces_down DOWN (any interface sufficient)"
+            return 0
+        else
+            log_message "Interfaces: ALL DOWN ($interfaces_down total)"
+            return 1
+        fi
+    fi
+}
+
 check_service_status() {
     local service="$1"
     local status_output
@@ -784,8 +983,8 @@ check_network_services() {
     
     if [ "$all_services_ready" = true ]; then
         if [ $active_services_count -eq 0 ]; then
-            log_message "Network services: ALL INACTIVE - skipping service checks"
-            return 0
+            log_message "Network services: ALL INACTIVE - waiting for services to start"
+            return 1
         else
             log_message "Network services: ALL READY ($active_services_count active)"
             return 0
@@ -797,7 +996,7 @@ check_network_services() {
 }
 
 main_loop() {
-    local all_interfaces_up=false
+    local interfaces_ready=false
     local gateway_reachable=false
     local services_ready=false
     local dns_working=false
@@ -810,11 +1009,7 @@ main_loop() {
         current_time=$(date +%s)
         elapsed_time=$((current_time - START_TIME))
         
-        if [ $elapsed_time -ge $TOTAL_TIMEOUT ]; then
-            log_message "*** TOTAL TIMEOUT REACHED (${TOTAL_TIMEOUT}s) - EXITING ***"
-            cleanup
-        fi
-        current_all_up=true
+        current_all_up=false
         current_gateway_reachable=false
         current_services_ready=false
         current_dns_working=false
@@ -828,23 +1023,10 @@ main_loop() {
             current_services_ready=true
         fi
         
-        interfaces=$(get_active_interfaces)
-        if [ -z "$interfaces" ]; then
-            log_message "No network interfaces found"
-            current_all_up=false
+        if check_interfaces_ready; then
+            current_all_up=true
         else
-            for interface in $interfaces; do
-                # check_interface_status now returns carrier status directly
-                if ! check_interface_status "$interface"; then
-                    current_all_up=false
-                fi
-                
-                if is_bond_interface "$interface"; then
-                    if ! check_bond_status "$interface"; then
-                        current_all_up=false
-                    fi
-                fi
-            done
+            current_all_up=false
         fi
         
         gateway=$(get_default_gateway)
@@ -861,8 +1043,8 @@ main_loop() {
         if [ $nm_status -eq 0 ]; then
             current_nm_connectivity_full=true
         elif [ $nm_status -eq 2 ]; then
-            # Service not available, consider it as "working" (don't block on it)
-            current_nm_connectivity_full=true
+            # Service not available, don't consider it as working - wait for it
+            current_nm_connectivity_full=false
         fi
         
         if check_arp_table; then
@@ -873,12 +1055,12 @@ main_loop() {
             current_routing_table_valid=true
         fi
         
-        if [ "$current_all_up" = true ] && [ "$all_interfaces_up" = false ]; then
-            log_message "*** ALL INTERFACES ARE NOW UP ***"
-            all_interfaces_up=true
-        elif [ "$current_all_up" = false ] && [ "$all_interfaces_up" = true ]; then
-            log_message "*** SOME INTERFACES ARE DOWN ***"
-            all_interfaces_up=false
+        if [ "$current_all_up" = true ] && [ "$interfaces_ready" = false ]; then
+            log_message "*** INTERFACES ARE NOW READY ***"
+            interfaces_ready=true
+        elif [ "$current_all_up" = false ] && [ "$interfaces_ready" = true ]; then
+            log_message "*** INTERFACES NO LONGER READY ***"
+            interfaces_ready=false
         fi
         
         if [ "$current_gateway_reachable" = true ] && [ "$gateway_reachable" = false ]; then
@@ -929,20 +1111,13 @@ main_loop() {
             routing_table_valid=false
         fi
         
-        if [ "$all_interfaces_up" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ] && [ "$arp_table_valid" = true ] && [ "$routing_table_valid" = true ]; then
+        if [ "$interfaces_ready" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ] && [ "$arp_table_valid" = true ] && [ "$routing_table_valid" = true ]; then
             if [ $network_complete_time -eq 0 ]; then
                 network_complete_time=$current_time
                 if [ "$BLOCKING_MODE" = true ]; then
                     log_message "*** NETWORK IS READY - UNBLOCKING BOOT PROCESS ***"
-                    cleanup
                 else
                     log_message "*** NETWORK SETUP COMPLETE (services + interfaces + gateway + DNS + NetworkManager connectivity + ARP table + routing table) *** (will exit in ${RUN_AFTER_SUCCESS}s)"
-                fi
-            else
-                time_since_complete=$((current_time - network_complete_time))
-                if [ $time_since_complete -ge $RUN_AFTER_SUCCESS ]; then
-                    log_message "*** RUN-AFTER-SUCCESS PERIOD COMPLETE (${RUN_AFTER_SUCCESS}s) - EXITING ***"
-                    cleanup
                 fi
             fi
         else
@@ -953,6 +1128,37 @@ main_loop() {
                     log_message "*** NETWORK NO LONGER COMPLETE - RESETTING SUCCESS TIMER ***"
                 fi
                 network_complete_time=0
+            fi
+        fi
+        
+        # Summary status message
+        local status_summary="Status:"
+        status_summary="$status_summary Interfaces=$([ "$current_all_up" = true ] && echo "UP" || echo "DOWN")"
+        status_summary="$status_summary Gateway=$([ "$current_gateway_reachable" = true ] && echo "UP" || echo "DOWN")"
+        status_summary="$status_summary Services=$([ "$current_services_ready" = true ] && echo "READY" || echo "NOT_READY")"
+        status_summary="$status_summary DNS=$([ "$current_dns_working" = true ] && echo "OK" || echo "FAIL")"
+        status_summary="$status_summary NetworkManager=$([ "$current_nm_connectivity_full" = true ] && echo "FULL" || echo "LIMITED")"
+        status_summary="$status_summary ARP=$([ "$current_arp_table_valid" = true ] && echo "VALID" || echo "INVALID")"
+        status_summary="$status_summary Routing=$([ "$current_routing_table_valid" = true ] && echo "VALID" || echo "INVALID")"
+        log_message "$status_summary"
+        
+        # Check exit conditions after showing summary
+        if [ $elapsed_time -ge $TOTAL_TIMEOUT ]; then
+            log_message "*** TOTAL TIMEOUT REACHED (${TOTAL_TIMEOUT}s) - EXITING ***"
+            cleanup
+        fi
+        
+        if [ "$interfaces_ready" = true ] && [ "$gateway_reachable" = true ] && [ "$services_ready" = true ] && [ "$dns_working" = true ] && [ "$nm_connectivity_full" = true ] && [ "$arp_table_valid" = true ] && [ "$routing_table_valid" = true ]; then
+            if [ "$BLOCKING_MODE" = true ]; then
+                # In blocking mode, exit immediately when network is ready
+                cleanup
+            elif [ $network_complete_time -ne 0 ]; then
+                # In monitoring mode, check if RUN_AFTER_SUCCESS period is complete
+                time_since_complete=$((current_time - network_complete_time))
+                if [ $time_since_complete -ge $RUN_AFTER_SUCCESS ]; then
+                    log_message "*** RUN-AFTER-SUCCESS PERIOD COMPLETE (${RUN_AFTER_SUCCESS}s) - EXITING ***"
+                    cleanup
+                fi
             fi
         fi
         
