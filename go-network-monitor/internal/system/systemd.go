@@ -3,7 +3,6 @@ package system
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 	
 	"github.com/coreos/go-systemd/v22/dbus"
@@ -60,7 +59,6 @@ func (sm *SystemdMonitor) GetEnabledServices(serviceNames []string) ([]string, e
 		unitStatus, err := sm.conn.GetUnitPropertiesContext(
 			context.Background(),
 			serviceName,
-			"org.freedesktop.systemd1.Unit",
 		)
 		if err != nil {
 			continue // Service not found, skip
@@ -125,7 +123,6 @@ func (sm *SystemdMonitor) checkSingleServiceStatus(serviceName string) (*Service
 	unitStatus, err := sm.conn.GetUnitPropertiesContext(
 		ctx,
 		serviceName,
-		"org.freedesktop.systemd1.Unit",
 	)
 	if err != nil {
 		return &ServiceStatus{

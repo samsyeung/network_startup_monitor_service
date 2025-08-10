@@ -3,13 +3,9 @@ package network
 import (
 	"bufio"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	
 	"github.com/vishvananda/netlink"
 )

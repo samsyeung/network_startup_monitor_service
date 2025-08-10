@@ -1,11 +1,6 @@
 package monitor
 
-import (
-	"fmt"
-	"net"
-
-	"github.com/samsyeung/network_startup_monitor_service/go-network-monitor/internal/system"
-)
+import ()
 
 // checkNetworkServices checks the status of network services
 func (m *Monitor) checkNetworkServices(enabledServices []string) bool {

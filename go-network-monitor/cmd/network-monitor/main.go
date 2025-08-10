@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"log"
-	"os"
 	
 	"github.com/samsyeung/network_startup_monitor_service/go-network-monitor/internal/config"
 	"github.com/samsyeung/network_startup_monitor_service/go-network-monitor/internal/monitor"
