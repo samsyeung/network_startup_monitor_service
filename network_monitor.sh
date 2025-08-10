@@ -660,11 +660,6 @@ is_interface_type_monitored() {
             "$interface_type")
                 return 0
                 ;;
-            "bond")
-                if is_bond_interface "$interface"; then
-                    return 0
-                fi
-                ;;
         esac
     done
     return 1
@@ -679,8 +674,12 @@ get_active_interfaces() {
     local filtered_interfaces=""
     
     for interface in $all_interfaces; do
+        local interface_type=$(get_interface_type "$interface")
         if is_interface_type_monitored "$interface"; then
             filtered_interfaces="$filtered_interfaces $interface"
+            if [ "$interface_type" = "bond" ]; then
+                log_message "Interface discovery: $interface (type=$interface_type) - BOND INTERFACE FOUND"
+            fi
         fi
     done
     
@@ -808,12 +807,16 @@ check_interfaces_ready() {
         
         # Check bond status if applicable
         if is_bond_interface "$interface"; then
+            log_message "Interface $interface: BOND INTERFACE DETECTED - checking bond status"
             if ! check_bond_status "$interface"; then
+                log_message "Interface $interface: BOND STATUS FAILED - marking interface down"
                 if [ "$interface_up" = true ]; then
                     ((interfaces_up--))
                     ((interfaces_down++))
                 fi
                 interface_up=false
+            else
+                log_message "Interface $interface: BOND STATUS OK"
             fi
         fi
         

@@ -89,9 +89,11 @@ func (m *Monitor) checkNetworkInterfaces() bool {
 		
 		// Check bond status if it's a bond interface
 		if m.ifaceMonitor.IsBondInterface(iface) {
+			m.logger.Logf("Interface %s: BOND INTERFACE DETECTED - checking bond status", iface)
 			bondStatus, err := m.ifaceMonitor.CheckBondStatus(iface)
 			if err != nil {
 				m.logger.Logf("Bond %s: ERROR - %v", iface, err)
+				m.logger.Logf("Interface %s: BOND STATUS FAILED - marking interface down", iface)
 				if interfaceUp {
 					interfacesUp--
 					interfacesDown++
@@ -105,8 +107,10 @@ func (m *Monitor) checkNetworkInterfaces() bool {
 				if bondStatus.LACPComplete {
 					m.logger.Logf("Bond %s: LACP negotiation complete", bondStatus.Name)
 					m.logger.Logf("Bond %s: HEALTHY", bondStatus.Name)
+					m.logger.Logf("Interface %s: BOND STATUS OK", iface)
 				} else {
 					m.logger.Logf("Bond %s: LACP negotiation incomplete", bondStatus.Name)
+					m.logger.Logf("Interface %s: BOND STATUS FAILED - marking interface down", iface)
 					if interfaceUp {
 						interfacesUp--
 						interfacesDown++
