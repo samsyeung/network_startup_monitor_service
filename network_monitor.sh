@@ -58,8 +58,8 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --sleep-interval)
-            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo "Error: --sleep-interval requires a positive integer (seconds)"
+            if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                echo "Error: --sleep-interval requires a positive number (seconds, fractional allowed)"
                 exit 1
             fi
             SLEEP_INTERVAL="$2"
@@ -115,7 +115,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --required-interfaces \"list\"    Space-separated interfaces that must be up (default: any interface sufficient)"
             echo "  --total-timeout SECONDS        Maximum runtime in seconds (default: 900)"
             echo "  --run-after-success SECONDS    Time to run after network ready in monitoring mode (default: 60)"
-            echo "  --sleep-interval SECONDS       Check frequency in seconds (default: 1)"
+            echo "  --sleep-interval SECONDS       Check frequency in seconds, fractional allowed (default: 1)"
             echo "  --ping-timeout SECONDS         Gateway ping timeout in seconds (default: 1)"
             echo "  --dns-timeout SECONDS          DNS resolution timeout in seconds (default: 1)"
             echo "  --interface-types \"list\"       Space-separated interface types to monitor (default: \"ethernet bond\")"
@@ -127,7 +127,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0                                           # Monitor any interface, continuous mode"
             echo "  $0 --blocking                                # Exit when network ready"
             echo "  $0 --required-interfaces \"eth0 eth1\"        # Require specific interfaces"
-            echo "  $0 --total-timeout 300 --dns-timeout 2      # Custom timeouts"
+            echo "  $0 --total-timeout 300 --sleep-interval 1.5 # Custom timeouts with fractional sleep"
             echo "  $0 --interface-types \"ethernet bond vlan\"   # Monitor additional interface types"
             exit 0
             ;;

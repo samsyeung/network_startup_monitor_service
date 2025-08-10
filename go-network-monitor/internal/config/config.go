@@ -96,8 +96,12 @@ func (c *Config) LoadFromEnv() {
 	}
 	
 	if val := os.Getenv("SLEEP_INTERVAL"); val != "" {
-		if interval, err := strconv.Atoi(val); err == nil {
-			c.SleepInterval = time.Duration(interval) * time.Second
+		// Try parsing as duration first (e.g., "1.5s", "500ms")
+		if duration, err := time.ParseDuration(val); err == nil {
+			c.SleepInterval = duration
+		} else if interval, err := strconv.ParseFloat(val, 64); err == nil {
+			// Fall back to parsing as float seconds for backward compatibility
+			c.SleepInterval = time.Duration(interval * float64(time.Second))
 		}
 	}
 	
@@ -142,7 +146,7 @@ func (c *Config) ParseFlags() {
 	// Timeouts
 	totalTimeout := flag.Int("total-timeout", 0, "Maximum runtime in seconds (default: 900)")
 	runAfterSuccess := flag.Int("run-after-success", 0, "Time to run after network ready in monitoring mode (default: 60)")
-	sleepInterval := flag.Int("sleep-interval", 0, "Check frequency in seconds (default: 1)")
+	sleepInterval := flag.String("sleep-interval", "", "Check frequency (e.g., '1s', '1.5s', '500ms') (default: 1s)")
 	pingTimeout := flag.Int("ping-timeout", 0, "Gateway ping timeout in seconds (default: 1)")
 	dnsTimeout := flag.Int("dns-timeout", 0, "DNS resolution timeout in seconds (default: 1)")
 	
@@ -169,7 +173,7 @@ func (c *Config) ParseFlags() {
 		fmt.Println("  network-monitor                                       # Monitor any interface, continuous mode")
 		fmt.Println("  network-monitor -blocking                            # Exit when network ready")
 		fmt.Println("  network-monitor -required-interfaces \"eth0 eth1\"     # Require specific interfaces")
-		fmt.Println("  network-monitor -total-timeout 300 -dns-timeout 2   # Custom timeouts")
+		fmt.Println("  network-monitor -total-timeout 300 -sleep-interval 1.5s # Custom timeouts")
 		fmt.Println("  network-monitor -interface-types \"ethernet bond vlan\" # Monitor additional interface types")
 		os.Exit(0)
 	}
@@ -196,8 +200,14 @@ func (c *Config) ParseFlags() {
 		c.RunAfterSuccess = time.Duration(*runAfterSuccess) * time.Second
 	}
 	
-	if *sleepInterval > 0 {
-		c.SleepInterval = time.Duration(*sleepInterval) * time.Second
+	if *sleepInterval != "" {
+		// Try parsing as duration first (e.g., "1.5s", "500ms")
+		if duration, err := time.ParseDuration(*sleepInterval); err == nil {
+			c.SleepInterval = duration
+		} else if interval, err := strconv.ParseFloat(*sleepInterval, 64); err == nil {
+			// Fall back to parsing as float seconds for backward compatibility
+			c.SleepInterval = time.Duration(interval * float64(time.Second))
+		}
 	}
 	
 	if *pingTimeout > 0 {
