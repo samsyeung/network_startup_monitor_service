@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -21,7 +22,8 @@ type Config struct {
 	BlockingMode     bool
 	
 	// Interface monitoring
-	InterfaceTypes   []string
+	InterfaceTypes      []string
+	RequiredInterfaces  []string  // Specific interfaces that must be up (empty = any interface sufficient)
 	
 	// Network services
 	NetworkServices  []string
@@ -36,14 +38,33 @@ type Config struct {
 
 // DefaultConfig returns a configuration with default values
 func DefaultConfig() *Config {
+	logFile := "/var/log/network_startup_monitor.log"
+	lockFile := "/var/run/network_monitor.lock"
+	
+	// Set log file location based on user privileges (like bash script)
+	if os.Geteuid() != 0 {
+		// Non-root user - use home directory or temp location
+		if home := os.Getenv("HOME"); home != "" {
+			if info, err := os.Stat(home); err == nil && info.IsDir() {
+				logFile = home + "/network_startup_monitor.log"
+				lockFile = home + "/network_monitor.lock"
+			}
+		} else {
+			uid := os.Getuid()
+			logFile = fmt.Sprintf("/tmp/network_startup_monitor_%d.log", uid)
+			lockFile = fmt.Sprintf("/tmp/network_monitor_%d.lock", uid)
+		}
+	}
+	
 	return &Config{
-		TotalTimeout:     15 * time.Minute,
-		RunAfterSuccess:  1 * time.Minute,
-		SleepInterval:    1 * time.Second,
-		PingTimeout:      1 * time.Second,
-		DNSTimeout:       3 * time.Second,
-		BlockingMode:     false,
-		InterfaceTypes:   []string{"ethernet", "bond"},
+		TotalTimeout:       15 * time.Minute,
+		RunAfterSuccess:    1 * time.Minute,  // Updated to match bash script v0.6.1
+		SleepInterval:      1 * time.Second,
+		PingTimeout:        1 * time.Second,
+		DNSTimeout:         1 * time.Second,  // Updated to match bash script v0.6.1
+		BlockingMode:       false,
+		InterfaceTypes:     []string{"ethernet", "bond"},
+		RequiredInterfaces: []string{},  // Empty = any interface sufficient
 		NetworkServices: []string{
 			"systemd-networkd.service",
 			"systemd-networkd-wait-online.service",
@@ -55,8 +76,8 @@ func DefaultConfig() *Config {
 			"wpa_supplicant.service",
 		},
 		ResolverHostname: "google.com",
-		LogFile:         "/var/log/network_startup_monitor.log",
-		LockFile:        "/var/run/network_monitor.lock",
+		LogFile:         logFile,
+		LockFile:        lockFile,
 	}
 }
 
@@ -96,6 +117,10 @@ func (c *Config) LoadFromEnv() {
 		c.InterfaceTypes = strings.Fields(val)
 	}
 	
+	if val := os.Getenv("REQUIRED_INTERFACES"); val != "" {
+		c.RequiredInterfaces = strings.Fields(val)
+	}
+	
 	if val := os.Getenv("NETWORK_SERVICES"); val != "" {
 		c.NetworkServices = strings.Fields(val)
 	}
@@ -107,11 +132,87 @@ func (c *Config) LoadFromEnv() {
 
 // ParseFlags parses command line flags
 func (c *Config) ParseFlags() {
-	blocking := flag.Bool("blocking", false, "Run in blocking mode (exit immediately when network is ready)")
+	// Operating mode
+	blocking := flag.Bool("blocking", false, "Exit immediately when network is ready (default: continuous monitoring)")
+	
+	// Interface configuration
+	requiredInterfaces := flag.String("required-interfaces", "", "Space-separated interfaces that must be up (default: any interface sufficient)")
+	interfaceTypes := flag.String("interface-types", "", "Space-separated interface types to monitor (default: \"ethernet bond\")")
+	
+	// Timeouts
+	totalTimeout := flag.Int("total-timeout", 0, "Maximum runtime in seconds (default: 900)")
+	runAfterSuccess := flag.Int("run-after-success", 0, "Time to run after network ready in monitoring mode (default: 60)")
+	sleepInterval := flag.Int("sleep-interval", 0, "Check frequency in seconds (default: 1)")
+	pingTimeout := flag.Int("ping-timeout", 0, "Gateway ping timeout in seconds (default: 1)")
+	dnsTimeout := flag.Int("dns-timeout", 0, "DNS resolution timeout in seconds (default: 1)")
+	
+	// Network configuration
+	networkServices := flag.String("network-services", "", "Space-separated network services to monitor")
+	resolverHostname := flag.String("resolver-hostname", "", "Hostname for DNS resolution test (default: google.com)")
+	
+	// Help
+	help := flag.Bool("help", false, "Show this help message")
+	helpShort := flag.Bool("h", false, "Show this help message")
+	
 	flag.Parse()
 	
+	// Show help if requested
+	if *help || *helpShort {
+		fmt.Println("Usage: network-monitor [OPTIONS]")
+		fmt.Println("")
+		fmt.Println("Network startup monitor service for Linux systems")
+		fmt.Println("")
+		fmt.Println("OPTIONS:")
+		flag.PrintDefaults()
+		fmt.Println("")
+		fmt.Println("Examples:")
+		fmt.Println("  network-monitor                                       # Monitor any interface, continuous mode")
+		fmt.Println("  network-monitor -blocking                            # Exit when network ready")
+		fmt.Println("  network-monitor -required-interfaces \"eth0 eth1\"     # Require specific interfaces")
+		fmt.Println("  network-monitor -total-timeout 300 -dns-timeout 2   # Custom timeouts")
+		fmt.Println("  network-monitor -interface-types \"ethernet bond vlan\" # Monitor additional interface types")
+		os.Exit(0)
+	}
+	
+	// Apply flag values
 	c.BlockingMode = *blocking
 	if c.BlockingMode {
 		c.RunAfterSuccess = 0
+	}
+	
+	if *requiredInterfaces != "" {
+		c.RequiredInterfaces = strings.Fields(*requiredInterfaces)
+	}
+	
+	if *interfaceTypes != "" {
+		c.InterfaceTypes = strings.Fields(*interfaceTypes)
+	}
+	
+	if *totalTimeout > 0 {
+		c.TotalTimeout = time.Duration(*totalTimeout) * time.Second
+	}
+	
+	if *runAfterSuccess > 0 {
+		c.RunAfterSuccess = time.Duration(*runAfterSuccess) * time.Second
+	}
+	
+	if *sleepInterval > 0 {
+		c.SleepInterval = time.Duration(*sleepInterval) * time.Second
+	}
+	
+	if *pingTimeout > 0 {
+		c.PingTimeout = time.Duration(*pingTimeout) * time.Second
+	}
+	
+	if *dnsTimeout > 0 {
+		c.DNSTimeout = time.Duration(*dnsTimeout) * time.Second
+	}
+	
+	if *networkServices != "" {
+		c.NetworkServices = strings.Fields(*networkServices)
+	}
+	
+	if *resolverHostname != "" {
+		c.ResolverHostname = *resolverHostname
 	}
 }

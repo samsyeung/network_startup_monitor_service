@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	
@@ -173,6 +174,17 @@ func (m *Monitor) performChecks(enabledServices []string) error {
 	// Check routing table
 	currentRoutingTableValid := m.checkRoutingTable()
 	
+	// Log status summary
+	m.logStatusSummary(
+		currentAllInterfacesUp,
+		currentGatewayReachable,
+		currentServicesReady,
+		currentDNSWorking,
+		currentNMConnectivity,
+		currentARPTableValid,
+		currentRoutingTableValid,
+	)
+	
 	// Update state and log transitions
 	m.updateStates(
 		currentAllInterfacesUp,
@@ -185,6 +197,56 @@ func (m *Monitor) performChecks(enabledServices []string) error {
 	)
 	
 	return nil
+}
+
+// logStatusSummary logs a concise summary of all component states
+func (m *Monitor) logStatusSummary(interfaces, gateway, services, dns, nm, arp, routing bool) {
+	var summary strings.Builder
+	summary.WriteString("Status:")
+	
+	if interfaces {
+		summary.WriteString(" Interfaces=UP")
+	} else {
+		summary.WriteString(" Interfaces=DOWN")
+	}
+	
+	if gateway {
+		summary.WriteString(" Gateway=UP")
+	} else {
+		summary.WriteString(" Gateway=DOWN")
+	}
+	
+	if services {
+		summary.WriteString(" Services=READY")
+	} else {
+		summary.WriteString(" Services=NOT_READY")
+	}
+	
+	if dns {
+		summary.WriteString(" DNS=OK")
+	} else {
+		summary.WriteString(" DNS=FAIL")
+	}
+	
+	if nm {
+		summary.WriteString(" NetworkManager=FULL")
+	} else {
+		summary.WriteString(" NetworkManager=LIMITED")
+	}
+	
+	if arp {
+		summary.WriteString(" ARP=VALID")
+	} else {
+		summary.WriteString(" ARP=INVALID")
+	}
+	
+	if routing {
+		summary.WriteString(" Routing=VALID")
+	} else {
+		summary.WriteString(" Routing=INVALID")
+	}
+	
+	m.logger.Log(summary.String())
 }
 
 // shouldExit determines if the monitor should exit

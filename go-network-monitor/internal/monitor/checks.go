@@ -51,7 +51,7 @@ func (m *Monitor) checkNetworkServices(enabledServices []string) bool {
 	return allReady
 }
 
-// checkNetworkInterfaces checks all network interfaces
+// checkNetworkInterfaces checks network interfaces based on requirements
 func (m *Monitor) checkNetworkInterfaces() bool {
 	interfaces, err := m.ifaceMonitor.GetActiveInterfaces()
 	if err != nil {
@@ -64,34 +64,44 @@ func (m *Monitor) checkNetworkInterfaces() bool {
 		return false
 	}
 	
-	allUp := true
+	var interfacesUp, interfacesDown int
+	var requiredInterfacesUp, requiredInterfacesDown int
+	interfaceStates := make(map[string]bool)
 	
+	// Check all monitored interfaces
 	for _, iface := range interfaces {
+		interfaceUp := false
+		
 		status, err := m.ifaceMonitor.CheckInterfaceStatus(iface)
 		if err != nil {
 			m.logger.Logf("Interface %s: ERROR - %v", iface, err)
-			allUp = false
+			interfacesDown++
+			interfaceStates[iface] = false
 			continue
 		}
 		
 		carrierStatus := "DOWN"
 		if status.Carrier {
 			carrierStatus = "UP"
+			interfaceUp = true
+			interfacesUp++
+		} else {
+			interfacesDown++
 		}
 		
 		m.logger.Logf("Interface %s: carrier=%s, operstate=%s", 
 			status.Name, carrierStatus, status.OperState)
-		
-		if !status.Carrier {
-			allUp = false
-		}
 		
 		// Check bond status if it's a bond interface
 		if m.ifaceMonitor.IsBondInterface(iface) {
 			bondStatus, err := m.ifaceMonitor.CheckBondStatus(iface)
 			if err != nil {
 				m.logger.Logf("Bond %s: ERROR - %v", iface, err)
-				allUp = false
+				if interfaceUp {
+					interfacesUp--
+					interfacesDown++
+				}
+				interfaceUp = false
 			} else {
 				m.logger.Logf("Bond %s: mode=%s, mii_status=%s, active_slave=%s, slaves=%d/%d",
 					bondStatus.Name, bondStatus.Mode, bondStatus.MIIStatus,
@@ -102,13 +112,53 @@ func (m *Monitor) checkNetworkInterfaces() bool {
 					m.logger.Logf("Bond %s: HEALTHY", bondStatus.Name)
 				} else {
 					m.logger.Logf("Bond %s: LACP negotiation incomplete", bondStatus.Name)
-					allUp = false
+					if interfaceUp {
+						interfacesUp--
+						interfacesDown++
+					}
+					interfaceUp = false
+				}
+			}
+		}
+		
+		interfaceStates[iface] = interfaceUp
+		
+		// Check if this is a required interface
+		if len(m.config.RequiredInterfaces) > 0 {
+			for _, reqInterface := range m.config.RequiredInterfaces {
+				if iface == reqInterface {
+					if interfaceUp {
+						requiredInterfacesUp++
+					} else {
+						requiredInterfacesDown++
+					}
+					break
 				}
 			}
 		}
 	}
 	
-	return allUp
+	// Determine if interfaces are ready
+	if len(m.config.RequiredInterfaces) > 0 {
+		// Specific interfaces required - all must be up
+		totalRequired := len(m.config.RequiredInterfaces)
+		if requiredInterfacesUp == totalRequired && requiredInterfacesDown == 0 {
+			m.logger.Logf("Required interfaces: ALL UP (%d/%d)", requiredInterfacesUp, totalRequired)
+			return true
+		} else {
+			m.logger.Logf("Required interfaces: %d DOWN, %d UP (need all %d)", requiredInterfacesDown, requiredInterfacesUp, totalRequired)
+			return false
+		}
+	} else {
+		// Any interface sufficient - at least one must be up
+		if interfacesUp > 0 {
+			m.logger.Logf("Interfaces: %d UP, %d DOWN (any interface sufficient)", interfacesUp, interfacesDown)
+			return true
+		} else {
+			m.logger.Logf("Interfaces: ALL DOWN (%d total)", interfacesDown)
+			return false
+		}
+	}
 }
 
 // checkGatewayConnectivity tests gateway reachability

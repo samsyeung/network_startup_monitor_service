@@ -10,13 +10,7 @@ import (
 )
 
 func main() {
-	// Check if running as root
-	if os.Geteuid() != 0 {
-		fmt.Fprintf(os.Stderr, "Error: Network monitor must be run as root\n")
-		os.Exit(1)
-	}
-	
-	// Load configuration
+	// Load configuration (supports both root and non-root users now)
 	cfg := config.DefaultConfig()
 	cfg.LoadFromEnv()
 	cfg.ParseFlags()
